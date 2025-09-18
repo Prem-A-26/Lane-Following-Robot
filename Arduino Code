@@ -1,0 +1,360 @@
+/*
+ * Advanced Lane Following Robot - White Line Tracking
+ * Features: PID Control, Speed Control, Calibration, LED Indicators
+ * Author: A. Prem
+ */
+
+// Motor Driver Pin Definitions
+const int motorLeftForward = 3;     // PWM pin for left motor forward
+const int motorLeftBackward = 4;    // PWM pin for left motor backward  
+const int motorRightForward = 5;    // PWM pin for right motor forward
+const int motorRightBackward = 6;   // PWM pin for right motor backward
+
+// Sensor Pin Definitions
+const int leftSensor = A0;          // Left IR sensor analog pin
+const int centerSensor = A1;        // Center IR sensor analog pin (optional)
+const int rightSensor = A2;         // Right IR sensor analog pin
+const int ultrasonicTrig = 7;       // Ultrasonic sensor trigger pin
+const int ultrasonicEcho = 8;       // Ultrasonic sensor echo pin
+
+// LED Indicator Pins
+const int ledLeft = 9;              // Left turn indicator LED
+const int ledRight = 10;            // Right turn indicator LED
+const int ledForward = 11;          // Forward movement indicator LED
+const int ledStop = 12;             // Stop/obstacle indicator LED
+
+// Buzzer Pin
+const int buzzer = 13;              // Buzzer for alerts
+
+// Calibration and Control Variables
+int baseSpeed = 150;                // Base motor speed (0-255)
+int maxSpeed = 200;                 // Maximum motor speed
+int minSpeed = 100;                 // Minimum motor speed
+int threshold = 500;                // White line detection threshold
+int obstacleDistance = 20;          // Obstacle detection distance in cm
+
+// PID Control Variables
+float kp = 1.0;                     // Proportional constant
+float ki = 0.0;                     // Integral constant  
+float kd = 0.1;                     // Derivative constant
+int lastError = 0;                  // Previous error value
+int integral = 0;                   // Integral sum
+
+// System State Variables
+bool obstacleDetected = false;      // Obstacle detection flag
+bool calibrationMode = false;       // Calibration mode flag
+unsigned long lastSensorRead = 0;   // Timing for sensor readings
+const int sensorInterval = 50;      // Sensor reading interval in ms
+
+void setup() {
+  // Initialize motor control pins
+  pinMode(motorLeftForward, OUTPUT);
+  pinMode(motorLeftBackward, OUTPUT);
+  pinMode(motorRightForward, OUTPUT);
+  pinMode(motorRightBackward, OUTPUT);
+  
+  // Initialize sensor pins
+  pinMode(leftSensor, INPUT);
+  pinMode(centerSensor, INPUT);
+  pinMode(rightSensor, INPUT);
+  pinMode(ultrasonicTrig, OUTPUT);
+  pinMode(ultrasonicEcho, INPUT);
+  
+  // Initialize LED indicator pins
+  pinMode(ledLeft, OUTPUT);
+  pinMode(ledRight, OUTPUT);
+  pinMode(ledForward, OUTPUT);
+  pinMode(ledStop, OUTPUT);
+  
+  // Initialize buzzer
+  pinMode(buzzer, OUTPUT);
+  
+  // Start serial communication for debugging
+  Serial.begin(9600);
+  Serial.println("Lane Following Robot Initialized");
+  
+  // Startup sequence with LED indicators
+  startupSequence();
+  
+  // Auto-calibration routine
+  calibrateSensors();
+}
+
+void loop() {
+  // Main control loop with timing control
+  if (millis() - lastSensorRead >= sensorInterval) {
+    lastSensorRead = millis();
+    
+    // Check for obstacles first
+    checkObstacle();
+    
+    if (!obstacleDetected) {
+      // Read sensor values
+      int leftValue = analogRead(leftSensor);
+      int centerValue = analogRead(centerSensor);
+      int rightValue = analogRead(rightSensor);
+      
+      // Print sensor values for debugging
+      printSensorValues(leftValue, centerValue, rightValue);
+      
+      // Calculate error for PID control
+      int error = calculateError(leftValue, centerValue, rightValue);
+      
+      // Apply PID control
+      int correction = pidControl(error);
+      
+      // Execute movement with correction
+      executeMovement(error, correction);
+      
+      // Update LED indicators
+      updateLEDs(error);
+    } else {
+      // Handle obstacle detection
+      handleObstacle();
+    }
+  }
+}
+
+// Function to calculate error based on sensor readings
+int calculateError(int left, int center, int right) {
+  // Convert sensor readings to binary (0 = black, 1 = white line)
+  int leftDetect = (left > threshold) ? 1 : 0;
+  int centerDetect = (center > threshold) ? 1 : 0;
+  int rightDetect = (right > threshold) ? 1 : 0;
+  
+  // Calculate weighted error based on sensor positions
+  // Error range: -2 (far left) to +2 (far right)
+  int error = 0;
+  
+  if (leftDetect && !centerDetect && !rightDetect) {
+    error = -2;  // Line is on far left
+  } else if (leftDetect && centerDetect && !rightDetect) {
+    error = -1;  // Line is on left-center
+  } else if (!leftDetect && centerDetect && !rightDetect) {
+    error = 0;   // Line is on center
+  } else if (!leftDetect && centerDetect && rightDetect) {
+    error = 1;   // Line is on right-center
+  } else if (!leftDetect && !centerDetect && rightDetect) {
+    error = 2;   // Line is on far right
+  } else if (leftDetect && centerDetect && rightDetect) {
+    error = 0;   // All sensors detect line (intersection)
+  } else {
+    error = lastError; // No line detected, use last known error
+  }
+  
+  return error;
+}
+
+// PID control function
+int pidControl(int error) {
+  // Calculate PID terms
+  int proportional = error;
+  integral += error;
+  int derivative = error - lastError;
+  
+  // Limit integral windup
+  if (integral > 100) integral = 100;
+  if (integral < -100) integral = -100;
+  
+  // Calculate PID output
+  float output = (kp * proportional) + (ki * integral) + (kd * derivative);
+  
+  // Update last error
+  lastError = error;
+  
+  // Constrain output to reasonable range
+  return constrain((int)output, -100, 100);
+}
+
+// Execute movement based on error and PID correction
+void executeMovement(int error, int correction) {
+  int leftSpeed = baseSpeed;
+  int rightSpeed = baseSpeed;
+  
+  if (error == 0) {
+    // Go straight
+    moveForwardPWM(baseSpeed, baseSpeed);
+  } else if (error < 0) {
+    // Turn left - slow down left motor, speed up right motor
+    leftSpeed = baseSpeed - abs(correction);
+    rightSpeed = baseSpeed + abs(correction);
+    moveForwardPWM(leftSpeed, rightSpeed);
+  } else {
+    // Turn right - slow down right motor, speed up left motor
+    leftSpeed = baseSpeed + abs(correction);
+    rightSpeed = baseSpeed - abs(correction);
+    moveForwardPWM(leftSpeed, rightSpeed);
+  }
+  
+  // Constrain motor speeds
+  leftSpeed = constrain(leftSpeed, minSpeed, maxSpeed);
+  rightSpeed = constrain(rightSpeed, minSpeed, maxSpeed);
+}
+
+// PWM-controlled forward movement
+void moveForwardPWM(int leftSpeed, int rightSpeed) {
+  analogWrite(motorLeftForward, leftSpeed);
+  digitalWrite(motorLeftBackward, LOW);
+  analogWrite(motorRightForward, rightSpeed);
+  digitalWrite(motorRightBackward, LOW);
+}
+
+// Sharp left turn
+void turnLeft() {
+  analogWrite(motorLeftForward, 0);
+  analogWrite(motorLeftBackward, baseSpeed);
+  analogWrite(motorRightForward, baseSpeed);
+  digitalWrite(motorRightBackward, LOW);
+}
+
+// Sharp right turn
+void turnRight() {
+  analogWrite(motorLeftForward, baseSpeed);
+  digitalWrite(motorLeftBackward, LOW);
+  analogWrite(motorRightForward, 0);
+  analogWrite(motorRightBackward, baseSpeed);
+}
+
+// Stop all motors
+void stopMotors() {
+  digitalWrite(motorLeftForward, LOW);
+  digitalWrite(motorLeftBackward, LOW);
+  digitalWrite(motorRightForward, LOW);
+  digitalWrite(motorRightBackward, LOW);
+}
+
+// Check for obstacles using ultrasonic sensor
+void checkObstacle() {
+  long duration, distance;
+  
+  // Send ultrasonic pulse
+  digitalWrite(ultrasonicTrig, LOW);
+  delayMicroseconds(2);
+  digitalWrite(ultrasonicTrig, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(ultrasonicTrig, LOW);
+  
+  // Read echo
+  duration = pulseIn(ultrasonicEcho, HIGH);
+  distance = (duration * 0.034) / 2;
+  
+  // Check if obstacle is detected
+  if (distance <= obstacleDistance && distance > 0) {
+    obstacleDetected = true;
+  } else {
+    obstacleDetected = false;
+  }
+}
+
+// Handle obstacle detection
+void handleObstacle() {
+  stopMotors();
+  digitalWrite(ledStop, HIGH);
+  
+  // Sound buzzer alert
+  tone(buzzer, 1000, 500);
+  
+  Serial.println("Obstacle detected! Stopping...");
+  
+  // Wait for obstacle to clear
+  delay(1000);
+  checkObstacle();
+  
+  if (!obstacleDetected) {
+    digitalWrite(ledStop, LOW);
+    Serial.println("Path clear, resuming...");
+  }
+}
+
+// Update LED indicators based on movement
+void updateLEDs(int error) {
+  // Turn off all LEDs first
+  digitalWrite(ledLeft, LOW);
+  digitalWrite(ledRight, LOW);
+  digitalWrite(ledForward, LOW);
+  
+  if (error < 0) {
+    digitalWrite(ledLeft, HIGH);
+  } else if (error > 0) {
+    digitalWrite(ledRight, HIGH);
+  } else {
+    digitalWrite(ledForward, HIGH);
+  }
+}
+
+// Calibrate sensors automatically
+void calibrateSensors() {
+  Serial.println("Starting sensor calibration...");
+  
+  int minVals[3] = {1023, 1023, 1023};
+  int maxVals[3] = {0, 0, 0};
+  
+  // Flash LEDs during calibration
+  for (int i = 0; i < 100; i++) {
+    digitalWrite(ledForward, HIGH);
+    delay(50);
+    digitalWrite(ledForward, LOW);
+    delay(50);
+    
+    // Read sensors and update min/max values
+    int sensors[3] = {analogRead(leftSensor), analogRead(centerSensor), analogRead(rightSensor)};
+    
+    for (int j = 0; j < 3; j++) {
+      if (sensors[j] < minVals[j]) minVals[j] = sensors[j];
+      if (sensors[j] > maxVals[j]) maxVals[j] = sensors[j];
+    }
+  }
+  
+  // Calculate new threshold
+  threshold = (maxVals[1] + minVals[1]) / 2;
+  
+  Serial.print("Calibration complete. New threshold: ");
+  Serial.println(threshold);
+}
+
+// Startup LED sequence
+void startupSequence() {
+  for (int i = 0; i < 3; i++) {
+    digitalWrite(ledLeft, HIGH);
+    delay(200);
+    digitalWrite(ledLeft, LOW);
+    digitalWrite(ledForward, HIGH);
+    delay(200);
+    digitalWrite(ledForward, LOW);
+    digitalWrite(ledRight, HIGH);
+    delay(200);
+    digitalWrite(ledRight, LOW);
+  }
+  
+  // Startup sound
+  tone(buzzer, 2000, 200);
+  delay(300);
+  tone(buzzer, 2500, 200);
+}
+
+// Print sensor values for debugging
+void printSensorValues(int left, int center, int right) {
+  Serial.print("L:");
+  Serial.print(left);
+  Serial.print(" C:");
+  Serial.print(center);
+  Serial.print(" R:");
+  Serial.print(right);
+  Serial.print(" Threshold:");
+  Serial.println(threshold);
+}
+
+// Function to adjust speed remotely (can be called via serial commands)
+void setSpeed(int newSpeed) {
+  baseSpeed = constrain(newSpeed, 50, 255);
+  Serial.print("Speed set to: ");
+  Serial.println(baseSpeed);
+}
+
+// Function to update PID values
+void setPID(float p, float i, float d) {
+  kp = p;
+  ki = i;
+  kd = d;
+  Serial.println("PID values updated");
+}
